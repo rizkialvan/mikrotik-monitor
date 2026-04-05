@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MikroTik Monitor - {{ config.MIKROTIK_HOST }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
+        .loading { opacity: 0.5; pointer-events: none; }
+    </style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-6xl">
+        <!-- Header -->
+        <div class="flex items-center justify-between mb-8">
+            <div>
+                <h1 class="text-3xl font-bold text-blue-400">🔧 MikroTik Monitor</h1>
+                <p class="text-gray-400 mt-1" id="router-host">Loading...</p>
+            </div>
+            <div class="flex items-center gap-3">
+                <div class="flex items-center gap-2">
+                    <div class="w-3 h-3 bg-green-500 rounded-full pulse-dot" id="status-dot"></div>
+                    <span class="text-sm" id="status-text">Connecting...</span>
+                </div>
+                <div class="text-sm text-gray-400" id="last-update">--:--:--</div>
+            </div>
+        </div>
+
+        <!-- Error Alert -->
+        <div id="error-alert" class="hidden bg-red-900/50 border border-red-500 rounded-lg p-4 mb-6">
+            <p class="text-red-300" id="error-message"></p>
+        </div>
+
+        <!-- System Health -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <!-- Uptime -->
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex items-center gap-3 mb-2">
+                    <span class="text-2xl">⏱️</span>
+                    <h3 class="text-gray-400 text-sm">Uptime</h3>
+                </div>
+                <p class="text-2xl font-bold" id="uptime">--</p>
+            </div>
+
+            <!-- CPU Load -->
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex items-center gap-3 mb-2">
+                    <span class="text-2xl">📊</span>
+                    <h3 class="text-gray-400 text-sm">CPU Load</h3>
+                </div>
+                <p class="text-2xl font-bold" id="cpu-load">--</p>
+                <div class="mt-2 bg-gray-700 rounded-full h-2">
+                    <div class="bg-blue-500 h-2 rounded-full transition-all" id="cpu-bar" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <!-- Memory -->
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex items-center gap-3 mb-2">
+                    <span class="text-2xl">💾</span>
+                    <h3 class="text-gray-400 text-sm">Memory</h3>
+                </div>
+                <p class="text-xl font-bold" id="memory">-- / --</p>
+                <p class="text-sm text-gray-400" id="memory-percent">--%</p>
+                <div class="mt-2 bg-gray-700 rounded-full h-2">
+                    <div class="bg-purple-500 h-2 rounded-full transition-all" id="memory-bar" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <!-- Version -->
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex items-center gap-3 mb-2">
+                    <span class="text-2xl">🏷️</span>
+                    <h3 class="text-gray-400 text-sm">RouterOS</h3>
+                </div>
+                <p class="text-lg font-bold" id="version">--</p>
+            </div>
+        </div>
+
+        <!-- Interfaces -->
+        <div class="bg-gray-800 rounded-lg p-6">
+            <h2 class="text-xl font-bold mb-4">🔌 Interface Utilization</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead>
+                        <tr class="text-left text-gray-400 border-b border-gray-700">
+                            <th class="pb-3 pr-4">Status</th>
+                            <th class="pb-3 pr-4">Name</th>
+                            <th class="pb-3 pr-4">Type</th>
+                            <th class="pb-3 pr-4">RX Rate</th>
+                            <th class="pb-3 pr-4">TX Rate</th>
+                            <th class="pb-3">Total</th>
+                        </tr>
+                    </thead>
+                    <tbody id="interfaces-table">
+                        <tr>
+                            <td colspan="6" class="py-8 text-center text-gray-400">Loading...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = '/api/status';
+        const REFRESH_INTERVAL = 5000; // 5 seconds
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function formatTime() {
+            return new Date().toLocaleTimeString('en-US', { hour12: false });
+        }
+
+        function parseUptime(uptime) {
+            if (!uptime || uptime === 'N/A') return '--';
+            // Format: 3d23h37m28s
+            const match = uptime.match(/(\d+d)?(\d+h)?(\d+m)?(\d+s)?/);
+            if (!match) return uptime;
+            
+            let result = [];
+            if (match[1]) result.push(match[1]);
+            if (match[2]) result.push(match[2]);
+            if (match[3]) result.push(match[3]);
+            return result.join(' ') || uptime;
+        }
+
+        function updateDashboard(data) {
+            // Update status
+            const statusDot = document.getElementById('status-dot');
+            const statusText = document.getElementById('status-text');
+            const errorAlert = document.getElementById('error-alert');
+            const errorMessage = document.getElementById('error-message');
+
+            if (data.success) {
+                statusDot.className = 'w-3 h-3 bg-green-500 rounded-full pulse-dot';
+                statusText.textContent = 'Connected';
+                errorAlert.classList.add('hidden');
+            } else {
+                statusDot.className = 'w-3 h-3 bg-red-500 rounded-full';
+                statusText.textContent = 'Error';
+                errorAlert.classList.remove('hidden');
+                errorMessage.textContent = data.error || 'Connection failed';
+            }
+
+            // Update last update time
+            document.getElementById('last-update').textContent = formatTime();
+
+            // Update system health
+            if (data.system) {
+                document.getElementById('uptime').textContent = parseUptime(data.system.uptime);
+                document.getElementById('cpu-load').textContent = data.system.cpu_load + '%';
+                document.getElementById('cpu-bar').style.width = data.system.cpu_load + '%';
+                
+                // Color code CPU
+                const cpuBar = document.getElementById('cpu-bar');
+                if (data.system.cpu_load > 80) cpuBar.className = 'bg-red-500 h-2 rounded-full transition-all';
+                else if (data.system.cpu_load > 50) cpuBar.className = 'bg-yellow-500 h-2 rounded-full transition-all';
+                else cpuBar.className = 'bg-green-500 h-2 rounded-full transition-all';
+
+                const used = data.system.memory_used || 0;
+                const total = data.system.total_memory || 0;
+                document.getElementById('memory').textContent = 
+                    formatBytes(used) + ' / ' + formatBytes(total);
+                document.getElementById('memory-percent').textContent = data.system.memory_percent + '%';
+                document.getElementById('memory-bar').style.width = data.system.memory_percent + '%';
+                
+                document.getElementById('version').textContent = data.system.version || 'N/A';
+            }
+
+            // Update interfaces
+            const tableBody = document.getElementById('interfaces-table');
+            if (data.interfaces && data.interfaces.length > 0) {
+                tableBody.innerHTML = data.interfaces.map(iface => {
+                    const statusIcon = iface.running ? '🟢' : '🔴';
+                    const rxRate = formatBytes(iface.rx_rate || 0) + '/s';
+                    const txRate = formatBytes(iface.tx_rate || 0) + '/s';
+                    const totalRate = (iface.total_rate_mbps || 0).toFixed(2) + ' Mbps';
+                    
+                    return `
+                        <tr class="border-b border-gray-700 hover:bg-gray-700/50">
+                            <td class="py-3 pr-4">${statusIcon}</td>
+                            <td class="py-3 pr-4 font-medium">${iface.name}</td>
+                            <td class="py-3 pr-4 text-gray-400">${iface.type}</td>
+                            <td class="py-3 pr-4 text-green-400">↓ ${rxRate}</td>
+                            <td class="py-3 pr-4 text-blue-400">↑ ${txRate}</td>
+                            <td class="py-3 font-bold">${totalRate}</td>
+                        </tr>
+                    `;
+                }).join('');
+            } else {
+                tableBody.innerHTML = `
+                    <tr>
+                        <td colspan="6" class="py-8 text-center text-gray-400">No interfaces found</td>
+                    </tr>
+                `;
+            }
+        }
+
+        async function fetchData() {
+            try {
+                const response = await fetch(API_URL);
+                const data = await response.json();
+                updateDashboard(data);
+            } catch (error) {
+                console.error('Fetch error:', error);
+                updateDashboard({
+                    success: false,
+                    error: 'Failed to fetch data: ' + error.message
+                });
+            }
+        }
+
+        // Initial fetch
+        fetchData();
+
+        // Auto refresh
+        setInterval(fetchData, REFRESH_INTERVAL);
+
+        // Set router host
+        document.getElementById('router-host').textContent = '{{ config.MIKROTIK_HOST }}';
+    </script>
+</body>
+</html>
