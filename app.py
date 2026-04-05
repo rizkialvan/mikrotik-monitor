@@ -6,6 +6,7 @@ Real-time health & interface utilization
 """
 
 import os
+import sys
 from flask import Flask, render_template, jsonify
 from librouteros import connect
 from librouteros.exceptions import LibRouterosError, ConnectionClosed
@@ -21,6 +22,7 @@ MIKROTIK_CONFIG = {
     'username': os.getenv('MIKROTIK_USER', 'jose'),
     'password': os.getenv('MIKROTIK_PASSWORD', 'josejose'),
     'plaintext_login': True,
+    'timeout': 10,
 }
 
 # Cache for data
@@ -29,6 +31,7 @@ data_cache = {
     'interfaces': None,
     'last_update': None,
     'error': None,
+    'fetch_count': 0,
 }
 
 def fetch_mikrotik_data():
@@ -85,11 +88,13 @@ def fetch_mikrotik_data():
         data_cache['interfaces'] = interfaces_data
         data_cache['last_update'] = time.time()
         data_cache['error'] = None
+        data_cache['fetch_count'] = data_cache.get('fetch_count', 0) + 1
         
         return True
         
     except Exception as e:
         data_cache['error'] = str(e)
+        data_cache['fetch_count'] = data_cache.get('fetch_count', 0) + 1
         return False
 
 # Background refresh
@@ -101,6 +106,11 @@ def background_refresh():
 # Start background thread
 refresh_thread = threading.Thread(target=background_refresh, daemon=True)
 refresh_thread.start()
+
+# Initial fetch (run immediately, not just in __main__)
+print("🔄 Starting initial MikroTik fetch...", file=sys.stderr)
+fetch_mikrotik_data()
+print(f"📊 Initial fetch complete: {data_cache['fetch_count']} attempts, error={data_cache['error']}", file=sys.stderr)
 
 @app.route('/')
 def index():
@@ -116,6 +126,7 @@ def api_status():
         'interfaces': data_cache['interfaces'],
         'last_update': data_cache['last_update'],
         'error': data_cache['error'],
+        'fetch_count': data_cache.get('fetch_count', 0),
     })
 
 @app.route('/health')
@@ -123,10 +134,7 @@ def health():
     """Health check endpoint"""
     return jsonify({'status': 'ok', 'timestamp': time.time()})
 
+# Don't run Flask directly in production (gunicorn handles it)
 if __name__ == '__main__':
-    # Initial fetch
-    fetch_mikrotik_data()
-    
-    # Run Flask
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
